@@ -1,0 +1,122 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Automate restoring your EC2 Instance's Metadata and Tags from AWS Backup
+Parameters:
+
+  S3DeploymentBucket:
+    Description: Enter the Amazon S3 bucket name that contains the AWS Lambda deployment package (Required)
+    Type: String
+  AWSBackupIAMRoleARN:
+    Description: Enter the AWSBackup IAM Role ARN (Required)
+    Type: String
+  ActivationTagKey:
+    Description: Enter the Activation Tag-Key
+    Type: String
+    Default: "Restore"
+  S3DeploymentKey:
+    Description: Enter the Amazon S3 key name for your AWS Lambda deployment package
+    Type: String
+    Default:  EC2Restore.zip
+
+Resources:
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: "EC2Restore"
+      Handler: EC2Restore.lambda_handler
+      Runtime: python3.9
+      Role:  !GetAtt EC2RestoreLambdaRole.Arn
+      MemorySize: 128
+      Timeout: 30
+      Code:
+        S3Bucket: !Ref S3DeploymentBucket
+        S3Key: !Ref S3DeploymentKey
+      Environment:
+        Variables:
+          BACKUP_IAM_ROLE_ARN: !Ref AWSBackupIAMRoleARN
+          ACTIVATION_TAG_KEY: !Ref ActivationTagKey
+
+  EC2RestoreLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: "Lambda_Permissions_EC2Restore"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+              - Effect: Allow
+                Action:
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*:log-stream:*"
+              - Effect: Allow
+                Action:
+                  - ec2:CreateTags
+                  - ec2:DescribeInstances
+                  - ec2:DescribeImages
+                  - backup:DescribeBackupVault
+                  - backup:StartRestoreJob
+                  - backup:UntagResource
+                  - backup:ListRecoveryPointsByBackupVault
+                  - backup:GetRecoveryPointRestoreMetadata
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource:
+                  - arn:aws:iam::*:role/*AwsBackup*
+                  - arn:aws:iam::*:role/*AWSBackup*
+                Condition:
+                    StringLike:
+                        'iam:PassedToService': 'backup.amazonaws.com'
+
+  LambdaInvokePermissionCloudwatchEvents:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt
+        - LambdaFunction
+        - Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt
+        - EC2RestoreEventBridgeRule
+        - Arn
+
+  EC2RestoreEventBridgeRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: Initiate-EC2Restore
+      Description: Trigger Lambda to perform AWS Backup EC2 restore.
+      EventPattern: '
+        {
+          "detail-type": [
+            "Tag Change on Resource"
+          ],
+          "source": [
+            "aws.tag"
+          ],
+          "detail": {
+                "service": [
+                    "backup"
+                    ]
+                }
+        }'
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt LambdaFunction.Arn
+          Id: LATEST
